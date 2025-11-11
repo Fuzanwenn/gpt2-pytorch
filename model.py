@@ -18,15 +18,48 @@ class SelfAttention(nn.Module):
     self.map_qkv = nn.Linear(embed_dim, 3 * embed_dim)   # old self.c_attn
 
     self.n_head = n_head
-    self.mask = torch.tril(torch.ones(block_size, block_size)).view(1, 1, block_size, block_size)
     self.embed_dim = embed_dim
 
+    # register mask so it follows the module's device (cpu/cuda/mps)
+    mask = torch.tril(torch.ones(block_size, block_size))
+    self.register_buffer("mask", mask.view(1, 1, block_size, block_size))
+
   def forward(self, x): 
-    B, T, C = x.size() # batch size, sequence length, embedding dimensionality (embed_dim)
-    ...
-    y = torch.randn_like(x)
-    assert y.shape == (B, T, C)
-    return y
+      # x: (B, T, C)
+      B, T, C = x.size()
+      H = self.n_head
+      head_dim = C // H
+
+      # 1. Linear map to get q, k, v: (B, T, 3C) -> three (B, T, C)
+      qkv = self.map_qkv(x)
+      q, k, v = qkv.split(self.embed_dim, dim=2)
+
+      # 2. Reshape for multi-head:
+      #    (B, T, C) -> (B, T, H, head_dim) -> (B, H, T, head_dim)
+      q = q.view(B, T, H, head_dim).permute(0, 2, 1, 3)
+      k = k.view(B, T, H, head_dim).permute(0, 2, 1, 3)
+      v = v.view(B, T, H, head_dim).permute(0, 2, 1, 3)
+
+      # 3. Scaled dot-product attention scores: (B, H, T, T)
+      att = (q @ k.transpose(-2, -1)) / (head_dim ** 0.5)
+
+      # 4. Causal mask: keep only tokens up to position t
+      #    self.mask: (1, 1, block_size, block_size)
+      mask = self.mask[:, :, :T, :T].to(x.device)
+      att = att.masked_fill(mask == 0, float('-inf'))
+
+      # 5. Softmax over keys dimension
+      att = F.softmax(att, dim=-1)
+
+      # 6. Apply attention weights to values: (B, H, T, head_dim)
+      out = att @ v
+
+      # 7. Merge heads back: (B, H, T, head_dim) -> (B, T, C)
+      out = out.permute(0, 2, 1, 3).contiguous().view(B, T, C)
+
+      y = out
+      assert y.shape == (B, T, C)
+      return y
 
 class MLP(nn.Module): 
 
@@ -73,17 +106,22 @@ class Transformer(nn.Module):
     self.block_size = block_size
 
   def forward(self, x: torch.Tensor): 
-    # x is a tensor of shape B, T, where B is batch and T is length of sequence 
-    _, T = x.size()
-    
-    token_embedding = self.token_encoder(x) 
-    position_embedding = self.position_encoder(torch.arange(T))
-    x = token_embedding + position_embedding
+    # x: (B, T)
+    B, T = x.size()
+
+    x = x.to(self.token_encoder.weight.device)  # ensure indices on same device as embeddings
+
+    token_embedding = self.token_encoder(x)  # (B, T, C)
+    positions = torch.arange(T, device=x.device)
+    position_embedding = self.position_encoder(positions)  # (T, C)
+
+    x = token_embedding + position_embedding  # broadcast over batch
 
     for block in self.transformer: 
       x = block(x) 
-    x = self.final_layernorm(x) 
-    logits = self.final_linearmap(x) 
+
+    x = self.final_layernorm(x)
+    logits = self.final_linearmap(x)
     return logits
 
   def sample(self, x, max_tokens):

@@ -11,14 +11,18 @@ n_head = 4
 learning_rate = 6e-4
 eval_interval = 500
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = (
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu"
+)
 
 # Load data
 train_loader, test_loader, vocab_size, stoi, itos = get_dataloaders(
     "shakespeare.txt", block_size, batch_size, train_split=0.9
 )
 
-model = Transformer(vocab_size=vocab_size, block_size=block_size, embed_dim=embed_dim, n_layer=n_layer)
+model = Transformer(vocab_size=vocab_size, block_size=block_size, embed_dim=embed_dim, n_layer=n_layer).to(device)
 # model = torch.load("model.pt", weights_only=False)
 
 model.eval() 
